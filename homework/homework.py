@@ -91,4 +91,119 @@
 #
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
-#
+
+import os
+import gzip
+import pandas as pd
+import pickle
+import json
+
+from sklearn.compose import ColumnTransformer
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    balanced_accuracy_score,
+    confusion_matrix
+)
+
+def load_dataset(path: str) -> pd.DataFrame:
+    return pd.read_csv(path, index_col=False, compression='zip')
+
+
+def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.rename(columns={'default payment next month': 'default'}, inplace=True)
+    df.drop(columns=['ID'], inplace=True)
+    df = df[df['MARRIAGE'] != 0]
+    df = df[df['EDUCATION'] != 0]
+    df['EDUCATION'] = df['EDUCATION'].apply(lambda x: x if x < 4 else 4)
+    return df
+
+
+def create_pipeline() -> Pipeline:
+    categorical_features = ["SEX", "EDUCATION", "MARRIAGE"]
+    transformer = ColumnTransformer(
+        transformers=[('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)],
+        remainder='passthrough'
+    )
+    return Pipeline(steps=[('preprocessor', transformer), ('classifier', RandomForestClassifier(random_state=42))])
+
+
+def create_estimator(pipeline: Pipeline) -> GridSearchCV:
+    param_grid = {
+        'classifier__n_estimators': [50, 100, 200],
+        'classifier__max_depth': [None, 5, 10, 20],
+        'classifier__min_samples_split': [2, 5, 10],
+        'classifier__min_samples_leaf': [1, 2, 4]
+    }
+    return GridSearchCV(
+        pipeline,
+        param_grid,
+        cv=10,
+        scoring='balanced_accuracy',
+        n_jobs=-1,
+        verbose=2,
+        refit=True
+    )
+
+
+def save_model(path: str, estimator: GridSearchCV):
+    with gzip.open(path, 'wb') as f:
+        pickle.dump(estimator, f)
+
+
+def calculate_precision_metrics(dataset_name: str, y, y_pred) -> dict:
+    return {
+        'type': 'metrics',
+        'dataset': dataset_name,
+        'precision': precision_score(y, y_pred, zero_division=0),
+        'balanced_accuracy': balanced_accuracy_score(y, y_pred),
+        'recall': recall_score(y, y_pred, zero_division=0),
+        'f1_score': f1_score(y, y_pred, zero_division=0)
+    }
+
+
+def calculate_confusion_metrics(dataset_name: str, y, y_pred) -> dict:
+    cm = confusion_matrix(y, y_pred)
+    return {
+        'type': 'cm_matrix',
+        'dataset': dataset_name,
+        'true_0': {"predicted_0": int(cm[0][0]), "predicted_1": int(cm[0][1])},
+        'true_1': {"predicted_0": int(cm[1][0]), "predicted_1": int(cm[1][1])}
+    }
+
+
+def main():
+    input_path = 'files/input/'
+    model_path = 'files/models/'
+
+    test_df = load_dataset(os.path.join(input_path, 'test_data.csv.zip'))
+    train_df = load_dataset(os.path.join(input_path, 'train_data.csv.zip'))
+    test_df = clean_dataset(test_df)
+    train_df = clean_dataset(train_df)
+
+    x_train, y_train = train_df.drop(columns=['default']), train_df['default']
+    x_test, y_test = test_df.drop(columns=['default']), test_df['default']
+
+    pipeline = create_pipeline()
+    estimator = create_estimator(pipeline)
+    estimator.fit(x_train, y_train)
+
+    save_model(os.path.join(model_path, 'model.pkl.gz'), estimator)
+
+    metrics = [
+        calculate_precision_metrics('train', y_train, estimator.predict(x_train)),
+        calculate_precision_metrics('test', y_test, estimator.predict(x_test)),
+        calculate_confusion_metrics('train', y_train, estimator.predict(x_train)),
+        calculate_confusion_metrics('test', y_test, estimator.predict(x_test))
+    ]
+    with open('files/output/metrics.json', 'w') as f:
+        json.dump(metrics, f, indent=4)
+
+if __name__ == "__main__":
+    main()
